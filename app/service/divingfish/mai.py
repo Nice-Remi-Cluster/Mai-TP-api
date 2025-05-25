@@ -1,3 +1,5 @@
+import time
+
 from loguru import logger
 
 from app.utils.os.path import mkdir_ignore_exists
@@ -14,6 +16,7 @@ from app.enums.divingfish.gametype import GameDataType
 import os
 import aiofile
 
+mkdir_ignore_exists("data/divingfish")
 mkdir_ignore_exists("data/divingfish/cover")
 
 DIVING_FISH_MAI_ENDPOINT = f"{DivingFishBaseUrl}/{GameDataType.MAIMAI.value}"
@@ -27,7 +30,6 @@ async def update_all_music_info(force: bool = False) -> tuple[bool, bool]:
     """
     从Diving Fish MaiMai API获取并更新本地音乐信息数据。
 
-    自动重试三次。
     该函数使用ETag机制检查音乐数据是否有更新，避免不必要的下载。
     如果本地缓存是最新的（HTTP 304），则继续使用缓存数据；否则获取最新数据并更新本地文件，并记录日志。
     可以通过force参数强制更新。
@@ -61,7 +63,7 @@ async def update_all_music_info(force: bool = False) -> tuple[bool, bool]:
                 await fp.write(json.dumps(resp.json()))
             async with aiofile.async_open("data/divingfish/music_data_ext.json", "w", encoding="utf-8") as fp:
                 await fp.write(json.dumps({
-                    "request_at": resp.headers["date"],
+                    "request_at": time.time(),
                     "etag": resp.headers["etag"],
                 }))
             return True, False
@@ -75,14 +77,80 @@ async def update_all_music_info(force: bool = False) -> tuple[bool, bool]:
         logger.exception(e)
         return False, False
 
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_fixed(1),
+    retry=retry_if_exception_type(httpx.NetworkError) | retry_if_exception_type(httpx.TimeoutException)
+)
+async def update_all_chart_stats() -> bool:
+    """
+    从Diving Fish MaiMai API获取并更新所有铺面的拟合难度等信息。
+
+    :return: 是否成功
+    """
+    try:
+        client = httpx.AsyncClient()
+
+        resp = await client.get(
+            f"{DIVING_FISH_MAI_ENDPOINT}/chart_stats"
+        )
+
+        if resp.status_code == 200:
+            async with aiofile.async_open("data/divingfish/chart_stats.json", "w", encoding="utf-8") as fp:
+                await fp.write(json.dumps(resp.json()))
+            async with aiofile.async_open("data/divingfish/chart_stats_ext.json", "w", encoding="utf-8") as fp:
+                await fp.write(json.dumps({
+                    "request_at": time.time(),
+                }))
+            return True
+        else:
+            raise httpx.NetworkError(f"status_code: {resp.status_code}; content: {resp.text}")
+    except httpx.NetworkError or httpx.TimeoutException as e:
+        raise e
+    except Exception as e:
+        logger.exception(e)
+        return False
+
 async def query_music_info(music_id: int) -> dict:
+    """
+    从本地已缓存的水鱼歌曲文件，获取铺面的信息
+    :param music_id:
+    :return:
+    """
     async with aiofile.async_open("data/divingfish/music_data.json", "r", encoding="utf-8") as f:
         music_data = json.loads(await f.read())
         for music in music_data:
-            if music["id"] == music_id:
+            if music["id"] == str(music_id):
                 return music
         return {}
 
+
+async def query_chart_stats(music_id: int) -> dict:
+    """
+    从本地已缓存的水鱼铺面额外信息
+    :param music_id:
+    :return:
+    """
+    async with aiofile.async_open("data/divingfish/chart_stats.json", "r", encoding="utf-8") as f:
+        chart_stats = json.loads(await f.read())
+        try:
+            return chart_stats["charts"][str(music_id)]
+        except KeyError:
+            return {}
+
+async def query_diff_stats() -> dict:
+    """
+    从本地已缓存的水鱼铺面额外信息
+    :param music_id:
+    :return:
+    """
+    async with aiofile.async_open("data/divingfish/chart_stats.json", "r", encoding="utf-8") as f:
+        chart_stats = json.loads(await f.read())
+        try:
+            return chart_stats["diff_data"]
+        except KeyError:
+            return {}
 
 @retry(
     stop=stop_after_attempt(3),
@@ -90,6 +158,14 @@ async def query_music_info(music_id: int) -> dict:
     retry=retry_if_exception_type(httpx.NetworkError) | retry_if_exception_type(httpx.TimeoutException)
 )
 async def query_player_scores_simple(username: str, is_qq: bool, b50: bool = True) -> tuple[bool, dict]:
+    """
+    从水鱼获取用户的b50或者b40
+
+    :param username:
+    :param is_qq:
+    :param b50:
+    :return:
+    """
     try:
         client = httpx.AsyncClient()
         data = {
@@ -122,6 +198,12 @@ async def query_player_scores_simple(username: str, is_qq: bool, b50: bool = Tru
     retry=retry_if_exception_type(httpx.NetworkError) | retry_if_exception_type(httpx.TimeoutException)
 )
 async def download_music_cover(songs_id: int) -> tuple[bool, dict]:
+    """
+    从水鱼下载歌曲封面到 data/divingfish/cover/{songs_id}.png
+
+    :param songs_id:
+    :return:
+    """
     try:
         client = httpx.AsyncClient()
         resp = await client.get(DivingFishCoverUrl.replace("{{cover_id}}", str(songs_id).zfill(5)))
@@ -135,5 +217,4 @@ async def download_music_cover(songs_id: int) -> tuple[bool, dict]:
     except Exception as e:
         logger.exception(e)
         return False, {"error": str(e)}
-
 
